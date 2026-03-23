@@ -22,6 +22,10 @@ func ChangeBackgroundImage() {
 		}
 	case "linux":
 		changeLinuxBackground(imagePath)
+	case "darwin":
+		if err := changeDarwinBackground(imagePath); err != nil {
+			log.Println("[-] Failed to set wallpaper on macOS:", err)
+		}
 	default:
 		log.Println("[-] Unsupported OS")
 	}

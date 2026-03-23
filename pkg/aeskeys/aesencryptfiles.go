@@ -19,8 +19,9 @@ type FileManager struct {
 
 // Encryptor handles AES encryption operations
 type Encryptor struct {
-	Key         []byte
-	FileManager FileManager
+	Key               []byte
+	FileManager       FileManager
+	MaxPlaintextBytes int64 // 0 = unlimited; encrypt refuses larger plaintext after stat
 }
 
 // NewEncryptor initializes the Encryptor with the AES key and file paths
@@ -98,6 +99,16 @@ func (e *Encryptor) writeToFile(filePath string, data []byte, id int) error {
 func (e *Encryptor) Encrypt(id int) error {
 	if err := e.validateKey(); err != nil {
 		return err
+	}
+
+	if e.MaxPlaintextBytes > 0 {
+		st, err := os.Stat(e.FileManager.InputFilePath)
+		if err != nil {
+			return fmt.Errorf("[worker %d] stat input file: %w", id, err)
+		}
+		if st.Size() > e.MaxPlaintextBytes {
+			return fmt.Errorf("[worker %d] file too large: %d > max %d", id, st.Size(), e.MaxPlaintextBytes)
+		}
 	}
 
 	// Read plaintext from input file

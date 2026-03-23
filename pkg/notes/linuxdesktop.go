@@ -1,3 +1,5 @@
+// Linux desktop wallpaper is not set via a raw kernel syscall; it requires a logged-in
+// session (X11/Wayland) and tools that talk to the compositor (gsettings, xfconf, feh).
 package notes
 
 import (

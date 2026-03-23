@@ -17,11 +17,22 @@ type AESDecryptor struct {
 	Ciphertext    []byte
 }
 
-// NewAESDecryptor initializes the AESDecryptor struct with the AES key and reads the encrypted file
-func NewAESDecryptor(aesKey []byte, encryptedFilePath string) (*AESDecryptor, error) {
+// NewAESDecryptor initializes the AESDecryptor struct with the AES key and reads the encrypted file.
+// maxEncryptedBytes, if > 0, rejects files larger than this before reading into memory.
+func NewAESDecryptor(aesKey []byte, encryptedFilePath string, maxEncryptedBytes int64) (*AESDecryptor, error) {
 	// Check if AES key length is valid
 	if len(aesKey) != 16 && len(aesKey) != 24 && len(aesKey) != 32 {
 		return nil, fmt.Errorf("invalid AES key length")
+	}
+
+	if maxEncryptedBytes > 0 {
+		st, err := os.Stat(encryptedFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("stat encrypted file: %w", err)
+		}
+		if st.Size() > maxEncryptedBytes {
+			return nil, fmt.Errorf("encrypted file too large: %d > max %d", st.Size(), maxEncryptedBytes)
+		}
 	}
 
 	// Read encrypted data from file
