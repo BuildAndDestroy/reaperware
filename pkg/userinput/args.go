@@ -1,6 +1,7 @@
 package userinput
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"reaperware/pkg/aeskeys"
@@ -15,11 +16,13 @@ const (
 	ExceptionStatement string = "Expected givemesomeskittlesbutidontwanttopayfordem or putthatbaaaaaaaack"
 )
 
-// Check for no arguments
-func UserInputCheck() {
-	if len(os.Args) <= 1 {
-		log.Fatalln("No arguments provided.")
-	}
+func usage() string {
+	return fmt.Sprintf(
+		"Usage:\n  %s <command>\n\nCommands:\n  %s\n  %s\n",
+		os.Args[0],
+		Encrypt,
+		Decrypt,
+	)
 }
 
 // Check for user input matches our const, otherwise throw "exception" and exit
@@ -33,8 +36,9 @@ func CommandCheck(command string) {
 
 // Parse user commands to execute program
 func UserCommands() {
-
-	UserInputCheck()
+	if len(os.Args) != 2 {
+		log.Fatalf("Invalid arguments.\n%s", usage())
+	}
 
 	var command string = os.Args[1]
 

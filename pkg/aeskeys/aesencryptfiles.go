@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -35,47 +36,47 @@ func NewEncryptor(key []byte, inputFilePath, encryptedFilePath, decryptedFilePat
 }
 
 // validateKey ensures the AES key length is valid
-func (e *Encryptor) validateKey() {
+func (e *Encryptor) validateKey() error {
 	if len(e.Key) != 16 && len(e.Key) != 24 && len(e.Key) != 32 {
-		log.Fatalln("[-] Invalid AES key length")
+		return fmt.Errorf("invalid AES key length")
 	}
+	return nil
 }
 
 // readInputFile reads the contents of the input file
-func (e *Encryptor) readInputFile(id int) []byte {
+func (e *Encryptor) readInputFile(id int) ([]byte, error) {
 	data, err := os.ReadFile(e.FileManager.InputFilePath)
 	if err != nil {
-		// I want this put into a separate list.
-		log.Printf("[-] [Worker %d] Error reading input file: %s\n", id, err)
+		return nil, fmt.Errorf("[worker %d] read input file: %w", id, err)
 	}
-	return data
+	return data, nil
 }
 
 // createCipherBlock creates a new AES cipher block
-func (e *Encryptor) createCipherBlock() cipher.Block {
+func (e *Encryptor) createCipherBlock() (cipher.Block, error) {
 	block, err := aes.NewCipher(e.Key)
 	if err != nil {
-		log.Fatalln("[-] Error creating AES cipher block:", err)
+		return nil, fmt.Errorf("create AES cipher block: %w", err)
 	}
-	return block
+	return block, nil
 }
 
 // createGCM creates a GCM cipher for AES
-func (e *Encryptor) createGCM(block cipher.Block) cipher.AEAD {
+func (e *Encryptor) createGCM(block cipher.Block) (cipher.AEAD, error) {
 	aesGCM, err := cipher.NewGCM(block)
 	if err != nil {
-		log.Fatalln("[-] Error creating GCM cipher:", err)
+		return nil, fmt.Errorf("create GCM cipher: %w", err)
 	}
-	return aesGCM
+	return aesGCM, nil
 }
 
 // generateNonce generates a random nonce
-func (e *Encryptor) generateNonce(aesGCM cipher.AEAD) []byte {
+func (e *Encryptor) generateNonce(aesGCM cipher.AEAD) ([]byte, error) {
 	nonce := make([]byte, aesGCM.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
-		log.Fatalln("[-] Error generating nonce:", err)
+		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
-	return nonce
+	return nonce, nil
 }
 
 // encryptData encrypts plaintext using AES-GCM
@@ -84,34 +85,53 @@ func (e *Encryptor) encryptData(aesGCM cipher.AEAD, nonce, plaintext []byte) []b
 }
 
 // writeToFile writes data to a specified file
-func (e *Encryptor) writeToFile(filePath string, data []byte, id int) {
+func (e *Encryptor) writeToFile(filePath string, data []byte, id int) error {
 	err := os.WriteFile(filePath, data, 0644)
 	if err != nil {
-		log.Printf("[-] [Worker %d] Error writing to file %s: %v", id, filePath, err)
+		return fmt.Errorf("[worker %d] write file %s: %w", id, filePath, err)
 	}
 	log.Printf("[+] [Worker %d] Successfully wrote to file: %s\n", id, filePath)
+	return nil
 }
 
 // Encrypt encrypts the input file and writes the result to the encrypted file
-func (e *Encryptor) Encrypt(id int) {
-	e.validateKey()
+func (e *Encryptor) Encrypt(id int) error {
+	if err := e.validateKey(); err != nil {
+		return err
+	}
 
 	// Read plaintext from input file
-	plaintext := e.readInputFile(id)
+	plaintext, err := e.readInputFile(id)
+	if err != nil {
+		return err
+	}
 
 	// Create AES cipher block and GCM
-	block := e.createCipherBlock()
-	aesGCM := e.createGCM(block)
+	block, err := e.createCipherBlock()
+	if err != nil {
+		return err
+	}
+	aesGCM, err := e.createGCM(block)
+	if err != nil {
+		return err
+	}
 
 	// Generate nonce and encrypt plaintext
-	nonce := e.generateNonce(aesGCM)
+	nonce, err := e.generateNonce(aesGCM)
+	if err != nil {
+		return err
+	}
 	ciphertext := e.encryptData(aesGCM, nonce, plaintext)
 
 	// Combine nonce and ciphertext
 	finalOutput := append(nonce, ciphertext...)
 
 	// Write encrypted data to the encrypted file
-	e.writeToFile(e.FileManager.EncryptedFilePath, finalOutput, id)
+	if err := e.writeToFile(e.FileManager.EncryptedFilePath, finalOutput, id); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Decrypt method for the Encryptor

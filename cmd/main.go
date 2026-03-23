@@ -8,9 +8,6 @@ import (
 
 // Execute the program
 func main() {
-
-	userinput.UserInputCheck()
-
 	initStart := time.Now()
 	userinput.UserCommands()
 

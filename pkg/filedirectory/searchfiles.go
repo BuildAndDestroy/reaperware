@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 )
 
 var (
@@ -46,9 +45,7 @@ type FileScanner struct {
 	TargetExtensions []string // List of targeted file extensions
 	ExcludedDirs     []string // List of directories to exclude
 	Results          chan string
-	wg               sync.WaitGroup
-	ScannedFiles     []string   // Store scanned file paths
-	mu               sync.Mutex // Mutex to safely append to ScannedFiles
+	ScannedFiles     []string // Store scanned file paths
 }
 
 // NewFileScanner creates a new FileScanner instance
@@ -66,47 +63,30 @@ func (fs *FileScanner) Start() {
 	// Launch results printer in a goroutine
 	go fs.printResults()
 
-	// Start scanning the root directory
 	log.Println("[+] Scanning for files")
-	fs.wg.Add(1)
-	go fs.scanDirectory(fs.RootDir)
+	err := filepath.WalkDir(fs.RootDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			log.Printf("[-] Error accessing %s: %v\n", path, err)
+			return nil
+		}
 
-	// Wait for all goroutines to complete
-	fs.wg.Wait()
+		if d.IsDir() && fs.isExcludedDir(path) {
+			log.Printf("[-] Skipping excluded directory: %s\n", path)
+			return filepath.SkipDir
+		}
+
+		if !d.IsDir() && fs.isTargetFile(d.Name()) {
+			fs.ScannedFiles = append(fs.ScannedFiles, path)
+			fs.Results <- path
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("[-] File walk failed: %v\n", err)
+	}
 
 	// Close the results channel
 	close(fs.Results)
-}
-
-// scanDirectory scans a single directory for targeted files
-func (fs *FileScanner) scanDirectory(dir string) {
-	defer fs.wg.Done()
-
-	// Skip directories in the exclusion list
-	if fs.isExcludedDir(dir) {
-		log.Printf("[-] Skipping excluded directory: %s\n", dir)
-		return
-	}
-
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		log.Printf("[-] Error accessing %s: %v\n", dir, err)
-		return
-	}
-
-	for _, file := range files {
-		path := filepath.Join(dir, file.Name())
-		if file.IsDir() {
-			// Process subdirectory in a new goroutine
-			fs.wg.Add(1)
-			go fs.scanDirectory(path)
-		} else if fs.isTargetFile(file.Name()) {
-			fs.mu.Lock()
-			fs.ScannedFiles = append(fs.ScannedFiles, path)
-			fs.mu.Unlock()
-			fs.Results <- path
-		}
-	}
 }
 
 // isTargetFile checks if a file has a targeted extension
@@ -122,8 +102,18 @@ func (fs *FileScanner) isTargetFile(fileName string) bool {
 
 // isExcludedDir checks if a directory is in the exclusion list
 func (fs *FileScanner) isExcludedDir(dir string) bool {
+	normalizedDir := filepath.Clean(dir)
+	if runtime.GOOS == "windows" {
+		normalizedDir = strings.ToLower(normalizedDir)
+	}
+
 	for _, excludedDir := range fs.ExcludedDirs {
-		if strings.HasPrefix(dir, excludedDir) {
+		normalizedExcludedDir := filepath.Clean(excludedDir)
+		if runtime.GOOS == "windows" {
+			normalizedExcludedDir = strings.ToLower(normalizedExcludedDir)
+		}
+
+		if strings.HasPrefix(normalizedDir, normalizedExcludedDir) {
 			return true
 		}
 	}
