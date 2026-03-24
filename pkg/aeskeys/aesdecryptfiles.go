@@ -3,6 +3,7 @@ package aeskeys
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"fmt"
 	"log"
 	"os"
 )
@@ -16,29 +17,40 @@ type AESDecryptor struct {
 	Ciphertext    []byte
 }
 
-// NewAESDecryptor initializes the AESDecryptor struct with the AES key and reads the encrypted file
-func NewAESDecryptor(aesKey []byte, encryptedFilePath string) *AESDecryptor {
+// NewAESDecryptor initializes the AESDecryptor struct with the AES key and reads the encrypted file.
+// maxEncryptedBytes, if > 0, rejects files larger than this before reading into memory.
+func NewAESDecryptor(aesKey []byte, encryptedFilePath string, maxEncryptedBytes int64) (*AESDecryptor, error) {
 	// Check if AES key length is valid
 	if len(aesKey) != 16 && len(aesKey) != 24 && len(aesKey) != 32 {
-		log.Fatalln("[-] Invalid AES key length")
+		return nil, fmt.Errorf("invalid AES key length")
+	}
+
+	if maxEncryptedBytes > 0 {
+		st, err := os.Stat(encryptedFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("stat encrypted file: %w", err)
+		}
+		if st.Size() > maxEncryptedBytes {
+			return nil, fmt.Errorf("encrypted file too large: %d > max %d", st.Size(), maxEncryptedBytes)
+		}
 	}
 
 	// Read encrypted data from file
 	encryptedData, err := os.ReadFile(encryptedFilePath)
 	if err != nil {
-		log.Fatalln("[-] Error reading encrypted file:", err)
+		return nil, fmt.Errorf("read encrypted file: %w", err)
 	}
 
 	// Create the AES cipher block
 	block, err := aes.NewCipher(aesKey)
 	if err != nil {
-		log.Fatalln("[-] Error creating AES cipher:", err)
+		return nil, fmt.Errorf("create AES cipher: %w", err)
 	}
 
 	// Create AES-GCM instance
 	aesGCM, err := cipher.NewGCM(block)
 	if err != nil {
-		log.Fatalln("[-] Error creating AES-GCM:", err)
+		return nil, fmt.Errorf("create AES-GCM: %w", err)
 	}
 
 	// Initialize the AESDecryptor struct
@@ -47,40 +59,50 @@ func NewAESDecryptor(aesKey []byte, encryptedFilePath string) *AESDecryptor {
 		EncryptedData: encryptedData,
 		AESCipher:     block,
 		AESGCM:        aesGCM,
-	}
+	}, nil
 }
 
 // ExtractNonceAndCiphertext extracts the nonce and ciphertext from the encrypted data
-func (d *AESDecryptor) ExtractNonceAndCiphertext() {
+func (d *AESDecryptor) ExtractNonceAndCiphertext() error {
 	nonceSize := d.AESGCM.NonceSize()
 	if len(d.EncryptedData) < nonceSize {
-		log.Fatalln("[-] Invalid encrypted data")
+		return fmt.Errorf("invalid encrypted data")
 	}
 	d.Nonce = d.EncryptedData[:nonceSize]
 	d.Ciphertext = d.EncryptedData[nonceSize:]
+	return nil
 }
 
 // Decrypt decrypts the ciphertext using the AES key and returns the plaintext
-func (d *AESDecryptor) Decrypt() []byte {
+func (d *AESDecryptor) Decrypt() ([]byte, error) {
 	plaintext, err := d.AESGCM.Open(nil, d.Nonce, d.Ciphertext, nil)
 	if err != nil {
-		log.Println("[-] Error decrypting file:", err)
+		return nil, fmt.Errorf("decrypt file: %w", err)
 	}
-	return plaintext
+	return plaintext, nil
 }
 
 // WriteToFile writes the decrypted content to a new file
-func (d *AESDecryptor) WriteToFile(decryptedFilePath string, plaintext []byte, id int) {
+func (d *AESDecryptor) WriteToFile(decryptedFilePath string, plaintext []byte, id int) error {
 	err := os.WriteFile(decryptedFilePath, plaintext, 0644)
 	if err != nil {
-		log.Printf("[-] [Worker %d] Error writing decrypted file: %s\n", id, err)
+		return fmt.Errorf("[worker %d] write decrypted file: %w", id, err)
 	}
 	log.Printf("[+] [Worker %d] File decrypted successfully: %s\n", id, decryptedFilePath)
+	return nil
 }
 
 // DecryptFile orchestrates the AES decryption process for a file
-func (d *AESDecryptor) DecryptFile(decryptedFilePath string, id int) {
-	d.ExtractNonceAndCiphertext()
-	plaintext := d.Decrypt()
-	d.WriteToFile(decryptedFilePath, plaintext, id)
+func (d *AESDecryptor) DecryptFile(decryptedFilePath string, id int) error {
+	if err := d.ExtractNonceAndCiphertext(); err != nil {
+		return err
+	}
+	plaintext, err := d.Decrypt()
+	if err != nil {
+		return err
+	}
+	if err := d.WriteToFile(decryptedFilePath, plaintext, id); err != nil {
+		return err
+	}
+	return nil
 }
